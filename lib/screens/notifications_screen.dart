@@ -25,7 +25,7 @@ class NotificationsScreen extends StatelessWidget {
     );
     if (picked != null) {
       await controller.updateNotificationSettings(
-        settings.copyWith(
+        controller.notificationSettings.copyWith(
           reminderHour: picked.hour,
           reminderMinute: picked.minute,
         ),
@@ -216,7 +216,7 @@ class NotificationsScreen extends StatelessWidget {
                   value: settings.enabled,
                   onChanged: (v) async {
                     await controller.updateNotificationSettings(
-                      settings.copyWith(enabled: v),
+                      controller.notificationSettings.copyWith(enabled: v),
                     );
                   },
                   title: const Text('啟用保養日期自動推播'),
@@ -228,7 +228,9 @@ class NotificationsScreen extends StatelessWidget {
                   onChanged: settings.enabled
                       ? (v) async {
                           await controller.updateNotificationSettings(
-                            settings.copyWith(includeDocumentAlerts: v),
+                            controller.notificationSettings.copyWith(
+                              includeDocumentAlerts: v,
+                            ),
                           );
                         }
                       : null,
@@ -284,15 +286,17 @@ class NotificationsScreen extends StatelessWidget {
                       label: Text(_dayLabel(day)),
                       onSelected: settings.enabled
                           ? (isSelected) async {
-                              final next =
-                                  List<int>.from(settings.advanceDays);
+                              // Read the live settings: the value captured
+                              // at build time is stale on a quick second tap.
+                              final current = controller.notificationSettings;
+                              final next = List<int>.from(current.advanceDays);
                               if (isSelected) {
                                 next.add(day);
                               } else {
                                 next.remove(day);
                               }
                               await controller.updateNotificationSettings(
-                                settings.copyWith(advanceDays: next),
+                                current.copyWith(advanceDays: next),
                               );
                             }
                           : null,

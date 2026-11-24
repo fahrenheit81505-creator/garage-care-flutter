@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../models/maintenance_schedule.dart';
 import '../state/garage_controller.dart';
+import 'form_helpers.dart';
 
 Future<void> showScheduleFormSheet(
   BuildContext context,
@@ -47,11 +48,17 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
   late DateTime _lastDate;
   late bool _reminderEnabled;
 
+  /// Fixed for the lifetime of the sheet so a repeated save updates the same
+  /// schedule instead of adding another one.
+  late final String _scheduleId;
+  bool _busy = false;
+
   @override
   void initState() {
     super.initState();
     final e = widget.editing;
     final vehicle = widget.controller.activeVehicle;
+    _scheduleId = e?.id ?? widget.controller.generateId('sch');
     _nameCtrl = TextEditingController(text: e?.name ?? '');
     _intervalKmCtrl = TextEditingController(text: '${e?.intervalKm ?? 10000}');
     _intervalMonthsCtrl =
@@ -77,10 +84,13 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
   }
 
   Future<void> _submit() async {
+    if (_busy) return;
     if (!_formKey.currentState!.validate()) return;
+    setState(() => _busy = true);
     final schedule = MaintenanceSchedule(
-      id: widget.editing?.id ?? widget.controller.generateId('sch'),
-      vehicleId: widget.editing?.vehicleId ?? widget.controller.activeVehicle.id,
+      id: _scheduleId,
+      vehicleId:
+          widget.editing?.vehicleId ?? widget.controller.activeVehicle.id,
       name: _nameCtrl.text.trim(),
       category: _category,
       intervalKm: int.tryParse(_intervalKmCtrl.text.trim()) ?? 0,
@@ -92,17 +102,45 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
       reminderEnabled: _reminderEnabled,
     );
 
-    await widget.controller.saveSchedule(schedule);
-    if (mounted) {
-      Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            widget.editing == null ? '已建立保養排程並更新系統推播' : '已更新保養排程並同步系統推播',
-          ),
-        ),
-      );
+    final saved = await runStorageAction(
+      context,
+      () => widget.controller.saveSchedule(schedule),
+    );
+    if (!mounted) return;
+    if (!saved) {
+      setState(() => _busy = false);
+      return;
     }
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          widget.editing == null ? '已建立保養排程並更新系統推播' : '已更新保養排程並同步系統推播',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _delete() async {
+    if (_busy) return;
+    final confirmed = await confirmDestructive(
+      context,
+      title: '刪除這個保養排程？',
+      message: '「${widget.editing!.name}」與其系統到期提醒將被永久刪除。此動作無法復原。',
+      confirmLabel: '刪除',
+    );
+    if (!confirmed || !mounted || _busy) return;
+    setState(() => _busy = true);
+    final deleted = await runStorageAction(
+      context,
+      () => widget.controller.deleteSchedule(widget.editing!.id),
+    );
+    if (!mounted) return;
+    if (!deleted) {
+      setState(() => _busy = false);
+      return;
+    }
+    Navigator.of(context).pop();
   }
 
   @override
@@ -133,11 +171,7 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
                   ),
                   if (isEdit)
                     TextButton.icon(
-                      onPressed: () async {
-                        await widget.controller
-                            .deleteSchedule(widget.editing!.id);
-                        if (context.mounted) Navigator.of(context).pop();
-                      },
+                      onPressed: _busy ? null : _delete,
                       icon: const Icon(Icons.delete_outline, size: 18),
                       label: const Text('刪除'),
                       style: TextButton.styleFrom(
@@ -193,9 +227,11 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
                       keyboardType: TextInputType.number,
                       inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                       decoration: const InputDecoration(
-                        labelText: '上次保養里程',
+                        labelText: '上次保養里程 *',
                         suffixText: 'km',
                       ),
+                      validator: (v) =>
+                          requiredWholeNumber(v, emptyMessage: '請輸入里程'),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -275,7 +311,7 @@ class _ScheduleFormSheetState extends State<_ScheduleFormSheet> {
               ),
               const SizedBox(height: 12),
               FilledButton(
-                onPressed: _submit,
+                onPressed: _busy ? null : _submit,
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),

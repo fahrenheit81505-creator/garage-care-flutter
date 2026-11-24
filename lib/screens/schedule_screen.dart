@@ -106,15 +106,19 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                     final color = _colorFor(eval.status);
 
                     final kmDesc = eval.kmRemaining != null
-                        ? (eval.kmRemaining! <= 0
-                            ? '超出 ${numFmt.format(eval.kmRemaining!.abs())} km（每 ${numFmt.format(sch.intervalKm)} km）'
-                            : '剩餘 ${numFmt.format(eval.kmRemaining)} km（每 ${numFmt.format(sch.intervalKm)} km）')
+                        ? (eval.kmRemaining! < 0
+                              ? '超出 ${numFmt.format(eval.kmRemaining!.abs())} km（每 ${numFmt.format(sch.intervalKm)} km）'
+                              : eval.kmRemaining == 0
+                              ? '已達保養里程（每 ${numFmt.format(sch.intervalKm)} km）'
+                              : '剩餘 ${numFmt.format(eval.kmRemaining)} km（每 ${numFmt.format(sch.intervalKm)} km）')
                         : '未設定里程週期';
 
                     final dateDesc = eval.daysRemaining != null
-                        ? (eval.daysRemaining! <= 0
-                            ? '逾期 ${eval.daysRemaining!.abs()} 天（預定 ${dateFmt.format(eval.dueDate!)}）'
-                            : '剩餘 ${eval.daysRemaining} 天（預定 ${dateFmt.format(eval.dueDate!)}）')
+                        ? (eval.daysRemaining! < 0
+                              ? '逾期 ${eval.daysRemaining!.abs()} 天（預定 ${dateFmt.format(eval.dueDate!)}）'
+                              : eval.isDueToday
+                              ? '今天到期（預定 ${dateFmt.format(eval.dueDate!)}）'
+                              : '剩餘 ${eval.daysRemaining} 天（預定 ${dateFmt.format(eval.dueDate!)}）')
                         : '未設定時間週期';
 
                     return Card(

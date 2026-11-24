@@ -8,6 +8,7 @@ import '../models/service_record.dart';
 import '../models/vehicle.dart';
 import '../services/notification_service.dart';
 import '../services/storage_service.dart';
+import '../utils/calendar_date.dart';
 
 class GarageController extends ChangeNotifier {
   GarageController({
@@ -20,6 +21,10 @@ class GarageController extends ChangeNotifier {
   final NotificationService _notifications;
 
   bool _isLoading = true;
+  bool _loadFailed = false;
+  List<String> _unreadableSections = const [];
+  Future<int>? _syncInFlight;
+  bool _syncRequestedAgain = false;
   List<Vehicle> _vehicles = [];
   String _activeVehicleId = '';
   List<MaintenanceSchedule> _schedules = [];
@@ -34,6 +39,19 @@ class GarageController extends ChangeNotifier {
   List<PendingNotificationRequest> _pendingNotifications = const [];
 
   bool get isLoading => _isLoading;
+
+  /// True when stored data could not be opened at all; [init] can be retried.
+  bool get loadFailed => _loadFailed;
+
+  /// Stored sections that were only partly readable on the last load.
+  List<String> get unreadableSections => List.unmodifiable(_unreadableSections);
+
+  void dismissStorageWarning() {
+    if (_unreadableSections.isEmpty) return;
+    _unreadableSections = const [];
+    notifyListeners();
+  }
+
   List<Vehicle> get vehicles => List.unmodifiable(_vehicles);
   String get activeVehicleId => _activeVehicleId;
   NotificationSettings get notificationSettings => _notificationSettings;
@@ -110,24 +128,41 @@ class GarageController extends ChangeNotifier {
 
   Future<void> init() async {
     _isLoading = true;
+    _loadFailed = false;
     notifyListeners();
 
-    final snapshot = await _storage.load();
-    _vehicles = List.of(snapshot.vehicles);
-    _activeVehicleId = snapshot.activeVehicleId;
-    _schedules = List.of(snapshot.schedules);
-    _records = List.of(snapshot.records);
-    _notificationSettings = snapshot.notificationSettings;
+    try {
+      final snapshot = await _storage.load();
+      _vehicles = List.of(snapshot.vehicles);
+      _activeVehicleId = snapshot.activeVehicleId;
+      _schedules = List.of(snapshot.schedules);
+      _records = List.of(snapshot.records);
+      _notificationSettings = snapshot.notificationSettings;
+      _unreadableSections = List.of(snapshot.unreadableSections);
+    } catch (e) {
+      debugPrint('GarageController: loading stored data failed: $e');
+      _loadFailed = true;
+      _isLoading = false;
+      notifyListeners();
+      return;
+    }
 
-    await _notifications.initialize();
-    _permissionStatus = await _notifications.checkPermissionStatus();
-    await _syncNotificationsOnly();
+    // The garage is usable even when the notification plugin is not.
+    try {
+      await _notifications.initialize();
+      _permissionStatus = await _notifications.checkPermissionStatus();
+      await _syncNotificationsOnly();
+    } catch (e) {
+      debugPrint('GarageController: notification setup failed: $e');
+    }
 
     _isLoading = false;
     notifyListeners();
   }
 
   Future<void> _persistAndSync() async {
+    // Show the change right away; saving and rescheduling follow.
+    notifyListeners();
     await _storage.save(
       GarageSnapshot(
         vehicles: _vehicles,
@@ -141,14 +176,35 @@ class GarageController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<int> _syncNotificationsOnly() async {
-    final count = await _notifications.syncMaintenanceNotifications(
-      vehicles: _vehicles,
-      schedules: _schedules,
-      settings: _notificationSettings,
-    );
-    _pendingNotifications = await _notifications.getPendingNotifications();
-    return count;
+  /// Runs one sync at a time. A request that arrives while a sync is running
+  /// does not start a second, interleaving one: the running sync is followed
+  /// by exactly one more pass that reads the then-current state, and every
+  /// waiting caller completes after that pass.
+  Future<int> _syncNotificationsOnly() {
+    final running = _syncInFlight;
+    if (running != null) {
+      _syncRequestedAgain = true;
+      return running;
+    }
+    return _syncInFlight = _runNotificationSync();
+  }
+
+  Future<int> _runNotificationSync() async {
+    try {
+      int count;
+      do {
+        _syncRequestedAgain = false;
+        count = await _notifications.syncMaintenanceNotifications(
+          vehicles: List.of(_vehicles),
+          schedules: List.of(_schedules),
+          settings: _notificationSettings,
+        );
+        _pendingNotifications = await _notifications.getPendingNotifications();
+      } while (_syncRequestedAgain);
+      return count;
+    } finally {
+      _syncInFlight = null;
+    }
   }
 
   Future<int> syncNotificationsNow() async {
@@ -275,7 +331,18 @@ class GarageController extends ChangeNotifier {
   Future<void> saveSchedule(MaintenanceSchedule schedule) async {
     final idx = _schedules.indexWhere((s) => s.id == schedule.id);
     if (idx >= 0) {
-      _schedules[idx] = schedule;
+      // Editing only the name, interval or notes must not turn a last-service
+      // value that came from a linked record into the hand-entered baseline.
+      final existing = _schedules[idx];
+      final lastServiceUnchanged =
+          schedule.lastKm == existing.lastKm &&
+          calendarDaysBetween(existing.lastDate, schedule.lastDate) == 0;
+      _schedules[idx] = lastServiceUnchanged
+          ? schedule.copyWith(
+              baselineKm: existing.baselineKm,
+              baselineDate: existing.baselineDate,
+            )
+          : schedule;
     } else {
       _schedules.add(schedule);
     }
@@ -298,6 +365,7 @@ class GarageController extends ChangeNotifier {
 
   Future<void> saveRecord(ServiceRecord record) async {
     final idx = _records.indexWhere((r) => r.id == record.id);
+    final previous = idx >= 0 ? _records[idx] : null;
     if (idx >= 0) {
       _records[idx] = record;
     } else {
@@ -310,23 +378,46 @@ class GarageController extends ChangeNotifier {
       _vehicles[vIdx] = _vehicles[vIdx].copyWith(odometer: record.odometer);
     }
 
-    // Sync linked schedules so next due date & OS notification automatically advance!
-    for (final schId in record.linkedScheduleIds) {
-      final sIdx = _schedules.indexWhere((s) => s.id == schId);
-      if (sIdx >= 0 && !record.date.isBefore(_schedules[sIdx].lastDate)) {
-        _schedules[sIdx] = _schedules[sIdx].copyWith(
-          lastDate: record.date,
-          lastKm: record.odometer,
-        );
-      }
-    }
+    // Linked schedules follow their latest record, so the next due date and
+    // OS notification advance. Schedules the record no longer points at, or
+    // whose record moved earlier, fall back accordingly.
+    _recomputeLastService({
+      ...?previous?.linkedScheduleIds,
+      ...record.linkedScheduleIds,
+    });
 
     await _persistAndSync();
   }
 
   Future<void> deleteRecord(String recordId) async {
-    _records.removeWhere((r) => r.id == recordId);
+    final idx = _records.indexWhere((r) => r.id == recordId);
+    if (idx < 0) return;
+    final removed = _records.removeAt(idx);
+    _recomputeLastService(removed.linkedScheduleIds);
     await _persistAndSync();
+  }
+
+  /// Sets each schedule's last service to the most recent of its hand-entered
+  /// baseline and the records still linked to it.
+  void _recomputeLastService(Iterable<String> scheduleIds) {
+    for (final scheduleId in scheduleIds.toSet()) {
+      final sIdx = _schedules.indexWhere((s) => s.id == scheduleId);
+      if (sIdx < 0) continue;
+      final schedule = _schedules[sIdx];
+
+      var lastDate = schedule.baselineDate;
+      var lastKm = schedule.baselineKm;
+      for (final r in _records) {
+        if (!r.linkedScheduleIds.contains(scheduleId)) continue;
+        final days = calendarDaysBetween(lastDate, r.date);
+        if (days > 0 || (days == 0 && r.odometer >= lastKm)) {
+          lastDate = r.date;
+          lastKm = r.odometer;
+        }
+      }
+
+      _schedules[sIdx] = schedule.copyWith(lastDate: lastDate, lastKm: lastKm);
+    }
   }
 
   // ---- Notification Settings ----

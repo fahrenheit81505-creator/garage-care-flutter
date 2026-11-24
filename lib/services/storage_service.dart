@@ -1,8 +1,12 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/maintenance_schedule.dart';
 import '../models/notification_settings.dart';
 import '../models/service_record.dart';
 import '../models/vehicle.dart';
+import '../utils/calendar_date.dart';
 
 class GarageSnapshot {
   final List<Vehicle> vehicles;
@@ -11,12 +15,17 @@ class GarageSnapshot {
   final List<ServiceRecord> records;
   final NotificationSettings notificationSettings;
 
+  /// Labels of the stored sections that could not be read completely.
+  /// Their original raw value has been kept under a backup key.
+  final List<String> unreadableSections;
+
   const GarageSnapshot({
     required this.vehicles,
     required this.activeVehicleId,
     required this.schedules,
     required this.records,
     required this.notificationSettings,
+    this.unreadableSections = const [],
   });
 }
 
@@ -27,53 +36,139 @@ class StorageService {
   static const _kRecords = 'gc_records_v1';
   static const _kNotificationSettings = 'gc_notification_settings_v1';
 
+  /// Suffix of the key an unreadable raw value is copied to before anything
+  /// can overwrite it.
+  static const backupSuffix = '_backup';
+
   Future<GarageSnapshot> load() async {
     final prefs = await SharedPreferences.getInstance();
     final rawVehicles = prefs.getString(_kVehicles);
     if (rawVehicles == null || rawVehicles.isEmpty) {
+      // First launch: nothing stored yet.
       final seed = createSeedSnapshot();
       await save(seed);
       return seed;
     }
 
-    try {
-      final vehicles = Vehicle.decodeList(rawVehicles);
-      if (vehicles.isEmpty) {
+    final rawSchedules = prefs.getString(_kSchedules);
+    final rawRecords = prefs.getString(_kRecords);
+    final rawSettings = prefs.getString(_kNotificationSettings);
+
+    // Each section is decoded on its own so one bad entry cannot take the
+    // rest of the garage with it.
+    final vehicles = _decodeList(rawVehicles, Vehicle.fromJson);
+    final schedules = _decodeList(rawSchedules, MaintenanceSchedule.fromJson);
+    final records = _decodeList(rawRecords, ServiceRecord.fromJson);
+    final settings = _decodeSettings(rawSettings);
+
+    final unreadable = <String>[
+      if (vehicles.damaged) '車輛',
+      if (schedules.damaged) '保養排程',
+      if (records.damaged) '保養紀錄',
+      if (settings.damaged) '通知設定',
+    ];
+
+    if (vehicles.items.isEmpty) {
+      if (!vehicles.damaged) {
+        // A valid but empty list: nothing to lose, start from the demo data.
         final seed = createSeedSnapshot();
         await save(seed);
         return seed;
       }
-
-      final activeId = prefs.getString(_kActiveVehicleId) ?? vehicles.first.id;
-      final resolvedActiveId =
-          vehicles.any((v) => v.id == activeId) ? activeId : vehicles.first.id;
-
-      final rawSchedules = prefs.getString(_kSchedules);
-      final schedules = rawSchedules != null && rawSchedules.isNotEmpty
-          ? MaintenanceSchedule.decodeList(rawSchedules)
-          : <MaintenanceSchedule>[];
-
-      final rawRecords = prefs.getString(_kRecords);
-      final records = rawRecords != null && rawRecords.isNotEmpty
-          ? ServiceRecord.decodeList(rawRecords)
-          : <ServiceRecord>[];
-
-      final rawSettings = prefs.getString(_kNotificationSettings);
-      final settings = rawSettings != null && rawSettings.isNotEmpty
-          ? NotificationSettings.decode(rawSettings)
-          : const NotificationSettings();
-
-      return GarageSnapshot(
-        vehicles: vehicles,
-        activeVehicleId: resolvedActiveId,
-        schedules: schedules,
-        records: records,
-        notificationSettings: settings,
-      );
-    } catch (_) {
+      // No vehicle could be read. Keep every raw value before the next save
+      // replaces it, and show the demo data without writing it.
+      await _backup(prefs, {
+        _kVehicles: rawVehicles,
+        _kSchedules: rawSchedules,
+        _kRecords: rawRecords,
+        _kNotificationSettings: rawSettings,
+      });
       final seed = createSeedSnapshot();
-      await save(seed);
-      return seed;
+      return GarageSnapshot(
+        vehicles: seed.vehicles,
+        activeVehicleId: seed.activeVehicleId,
+        schedules: seed.schedules,
+        records: seed.records,
+        notificationSettings: seed.notificationSettings,
+        unreadableSections: unreadable,
+      );
+    }
+
+    // Entries that failed to decode are skipped; keep the raw value they came
+    // from so the next save does not erase them for good.
+    await _backup(prefs, {
+      if (vehicles.damaged) _kVehicles: rawVehicles,
+      if (schedules.damaged) _kSchedules: rawSchedules,
+      if (records.damaged) _kRecords: rawRecords,
+      if (settings.damaged) _kNotificationSettings: rawSettings,
+    });
+
+    final activeId =
+        prefs.getString(_kActiveVehicleId) ?? vehicles.items.first.id;
+    final resolvedActiveId = vehicles.items.any((v) => v.id == activeId)
+        ? activeId
+        : vehicles.items.first.id;
+
+    return GarageSnapshot(
+      vehicles: vehicles.items,
+      activeVehicleId: resolvedActiveId,
+      schedules: schedules.items,
+      records: records.items,
+      notificationSettings: settings.value,
+      unreadableSections: unreadable,
+    );
+  }
+
+  static ({List<T> items, bool damaged}) _decodeList<T>(
+    String? raw,
+    T Function(Map<String, dynamic>) fromJson,
+  ) {
+    if (raw == null || raw.isEmpty) return (items: <T>[], damaged: false);
+
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } catch (e) {
+      debugPrint('StorageService: stored list is not valid JSON: $e');
+      return (items: <T>[], damaged: true);
+    }
+    if (decoded is! List) return (items: <T>[], damaged: true);
+
+    final items = <T>[];
+    var damaged = false;
+    for (final entry in decoded) {
+      try {
+        items.add(fromJson(entry as Map<String, dynamic>));
+      } catch (e) {
+        debugPrint('StorageService: skipped unreadable entry: $e');
+        damaged = true;
+      }
+    }
+    return (items: items, damaged: damaged);
+  }
+
+  static ({NotificationSettings value, bool damaged}) _decodeSettings(
+    String? raw,
+  ) {
+    if (raw == null || raw.isEmpty) {
+      return (value: const NotificationSettings(), damaged: false);
+    }
+    try {
+      return (value: NotificationSettings.decode(raw), damaged: false);
+    } catch (e) {
+      debugPrint('StorageService: notification settings unreadable: $e');
+      return (value: const NotificationSettings(), damaged: true);
+    }
+  }
+
+  static Future<void> _backup(
+    SharedPreferences prefs,
+    Map<String, String?> rawByKey,
+  ) async {
+    for (final entry in rawByKey.entries) {
+      final raw = entry.value;
+      if (raw == null || raw.isEmpty) continue;
+      await prefs.setString('${entry.key}$backupSuffix', raw);
     }
   }
 
@@ -95,8 +190,7 @@ class StorageService {
   }
 
   static GarageSnapshot createSeedSnapshot({DateTime? now}) {
-    final base = now ?? DateTime.now();
-    final today = DateTime(base.year, base.month, base.day);
+    final today = dateOnly(now ?? DateTime.now());
     const v1Id = 'veh_rav4';
     const v2Id = 'veh_gogoro';
 
@@ -113,8 +207,8 @@ class StorageService {
         tireSpec: '225/60 R18',
         shopName: '豐田北投服務廠',
         shopPhone: '02-2891-5520',
-        inspectionDue: today.add(const Duration(days: 45)),
-        insuranceExpiry: today.add(const Duration(days: 28)),
+        inspectionDue: addCalendarDays(today, 45),
+        insuranceExpiry: addCalendarDays(today, 28),
       ),
       Vehicle(
         id: v2Id,
@@ -128,8 +222,8 @@ class StorageService {
         tireSpec: '120/70-12 / 130/70-12',
         shopName: '祥發機車精品保養',
         shopPhone: '02-2823-1148',
-        inspectionDue: today.add(const Duration(days: 90)),
-        insuranceExpiry: today.add(const Duration(days: 62)),
+        inspectionDue: addCalendarDays(today, 90),
+        insuranceExpiry: addCalendarDays(today, 62),
       ),
     ];
 
@@ -142,7 +236,7 @@ class StorageService {
         intervalKm: 10000,
         intervalMonths: 6,
         lastKm: 50100,
-        lastDate: today.subtract(const Duration(days: 170)),
+        lastDate: addCalendarDays(today, -170),
         estimatedCost: 4200,
         notes: '使用原廠 0W-16 機油與墊片',
         reminderEnabled: true,
@@ -155,7 +249,7 @@ class StorageService {
         intervalKm: 10000,
         intervalMonths: 6,
         lastKm: 48200,
-        lastDate: today.subtract(const Duration(days: 192)),
+        lastDate: addCalendarDays(today, -192),
         estimatedCost: 600,
         notes: '前後對調並維持胎壓 35 PSI',
         reminderEnabled: true,
@@ -168,7 +262,7 @@ class StorageService {
         intervalKm: 15000,
         intervalMonths: 12,
         lastKm: 46000,
-        lastDate: today.subtract(const Duration(days: 330)),
+        lastDate: addCalendarDays(today, -330),
         estimatedCost: 950,
         notes: 'PM2.5 活性碳濾網',
         reminderEnabled: true,
@@ -181,7 +275,7 @@ class StorageService {
         intervalKm: 40000,
         intervalMonths: 24,
         lastKm: 40000,
-        lastDate: today.subtract(const Duration(days: 365)),
+        lastDate: addCalendarDays(today, -365),
         estimatedCost: 2200,
         notes: 'DOT4 煞車油，同步檢測含水量',
         reminderEnabled: true,
@@ -194,7 +288,7 @@ class StorageService {
         intervalKm: 10000,
         intervalMonths: 6,
         lastKm: 50100,
-        lastDate: today.subtract(const Duration(days: 162)),
+        lastDate: addCalendarDays(today, -162),
         estimatedCost: 0,
         notes: '後座右側吸風口濾網清潔',
         reminderEnabled: true,
@@ -208,7 +302,7 @@ class StorageService {
         intervalKm: 1000,
         intervalMonths: 3,
         lastKm: 13850,
-        lastDate: today.subtract(const Duration(days: 78)),
+        lastDate: addCalendarDays(today, -78),
         estimatedCost: 550,
         notes: '每 1,000 公里更換機油、每 2,000 公里更換齒輪油',
         reminderEnabled: true,
@@ -221,7 +315,7 @@ class StorageService {
         intervalKm: 5000,
         intervalMonths: 6,
         lastKm: 10000,
-        lastDate: today.subtract(const Duration(days: 160)),
+        lastDate: addCalendarDays(today, -160),
         estimatedCost: 900,
         notes: '檢查皮帶裂紋與普利珠磨耗',
         reminderEnabled: true,
@@ -233,7 +327,7 @@ class StorageService {
         id: 'rec_1',
         vehicleId: v1Id,
         title: '5 萬公里定期保養',
-        date: today.subtract(const Duration(days: 170)),
+        date: addCalendarDays(today, -170),
         odometer: 50100,
         category: ServiceCategory.maintenance,
         cost: 4380,
@@ -245,7 +339,7 @@ class StorageService {
         id: 'rec_2',
         vehicleId: v1Id,
         title: '更換 12V 輔助電瓶 (湯淺 AGM)',
-        date: today.subtract(const Duration(days: 35)),
+        date: addCalendarDays(today, -35),
         odometer: 57250,
         category: ServiceCategory.repair,
         cost: 5200,
@@ -256,7 +350,7 @@ class StorageService {
         id: 'rec_3',
         vehicleId: v1Id,
         title: '四輪更換 Michelin Primacy 4+',
-        date: today.subtract(const Duration(days: 192)),
+        date: addCalendarDays(today, -192),
         odometer: 48200,
         category: ServiceCategory.tires,
         cost: 21600,
@@ -268,7 +362,7 @@ class StorageService {
         id: 'rec_4',
         vehicleId: v2Id,
         title: '例行更換機油與齒輪油',
-        date: today.subtract(const Duration(days: 78)),
+        date: addCalendarDays(today, -78),
         odometer: 13850,
         category: ServiceCategory.maintenance,
         cost: 550,

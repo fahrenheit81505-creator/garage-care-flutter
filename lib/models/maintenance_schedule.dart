@@ -1,10 +1,8 @@
 import 'dart:convert';
 
-enum MaintenanceStatus {
-  overdue,
-  soon,
-  good,
-}
+import '../utils/calendar_date.dart';
+
+enum MaintenanceStatus { overdue, soon, good }
 
 enum ServiceCategory {
   maintenance('定期保養'),
@@ -33,6 +31,12 @@ class MaintenanceSchedule {
   final int intervalMonths;
   final int lastKm;
   final DateTime lastDate;
+
+  /// Last service entered by hand on the schedule itself. Linked service
+  /// records move [lastKm] / [lastDate] forward; when such a record is edited
+  /// or deleted the schedule falls back to this baseline.
+  final int baselineKm;
+  final DateTime baselineDate;
   final int estimatedCost;
   final String notes;
   final bool reminderEnabled;
@@ -46,10 +50,13 @@ class MaintenanceSchedule {
     this.intervalMonths = 6,
     required this.lastKm,
     required this.lastDate,
+    int? baselineKm,
+    DateTime? baselineDate,
     this.estimatedCost = 0,
     this.notes = '',
     this.reminderEnabled = true,
-  });
+  }) : baselineKm = baselineKm ?? lastKm,
+       baselineDate = baselineDate ?? lastDate;
 
   /// Next due date calculated from [lastDate] + [intervalMonths].
   DateTime? get nextDueDate {
@@ -67,12 +74,8 @@ class MaintenanceSchedule {
   /// Next due odometer in km.
   int? get nextDueKm => intervalKm > 0 ? lastKm + intervalKm : null;
 
-  ScheduleEvaluation evaluate({
-    required int currentOdometer,
-    DateTime? now,
-  }) {
-    final reference = now ?? DateTime.now();
-    final today = DateTime(reference.year, reference.month, reference.day);
+  ScheduleEvaluation evaluate({required int currentOdometer, DateTime? now}) {
+    final today = dateOnly(now ?? DateTime.now());
 
     final int? kmRemaining =
         intervalKm > 0 ? (lastKm + intervalKm) - currentOdometer : null;
@@ -84,19 +87,21 @@ class MaintenanceSchedule {
     int? daysRemaining;
     double timeProgress = 0.0;
     if (dueDate != null) {
-      daysRemaining = dueDate.difference(today).inDays;
-      final lastDay = DateTime(lastDate.year, lastDate.month, lastDate.day);
-      final totalDays = dueDate.difference(lastDay).inDays;
-      final elapsedDays = today.difference(lastDay).inDays;
+      daysRemaining = calendarDaysBetween(today, dueDate);
+      final totalDays = calendarDaysBetween(lastDate, dueDate);
+      final elapsedDays = calendarDaysBetween(lastDate, today);
       if (totalDays > 0) {
         timeProgress = (elapsedDays / totalDays).clamp(0.0, 1.3);
       }
     }
 
     final worstProgress = kmProgress > timeProgress ? kmProgress : timeProgress;
-    final bool isOverdue = (kmRemaining != null && kmRemaining <= 0) ||
-        (daysRemaining != null && daysRemaining <= 0);
-    final bool isSoon = !isOverdue &&
+    // Exactly on the due date / due mileage is "due now", not overdue.
+    final bool isOverdue =
+        (kmRemaining != null && kmRemaining < 0) ||
+        (daysRemaining != null && daysRemaining < 0);
+    final bool isSoon =
+        !isOverdue &&
         ((kmRemaining != null &&
                 kmRemaining <= (intervalKm * 0.15).round().clamp(500, 1500)) ||
             (daysRemaining != null && daysRemaining <= 30) ||
@@ -127,6 +132,8 @@ class MaintenanceSchedule {
     int? intervalMonths,
     int? lastKm,
     DateTime? lastDate,
+    int? baselineKm,
+    DateTime? baselineDate,
     int? estimatedCost,
     String? notes,
     bool? reminderEnabled,
@@ -140,6 +147,8 @@ class MaintenanceSchedule {
       intervalMonths: intervalMonths ?? this.intervalMonths,
       lastKm: lastKm ?? this.lastKm,
       lastDate: lastDate ?? this.lastDate,
+      baselineKm: baselineKm ?? this.baselineKm,
+      baselineDate: baselineDate ?? this.baselineDate,
       estimatedCost: estimatedCost ?? this.estimatedCost,
       notes: notes ?? this.notes,
       reminderEnabled: reminderEnabled ?? this.reminderEnabled,
@@ -147,18 +156,20 @@ class MaintenanceSchedule {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'vehicleId': vehicleId,
-        'name': name,
-        'category': category.name,
-        'intervalKm': intervalKm,
-        'intervalMonths': intervalMonths,
-        'lastKm': lastKm,
-        'lastDate': lastDate.toIso8601String(),
-        'estimatedCost': estimatedCost,
-        'notes': notes,
-        'reminderEnabled': reminderEnabled,
-      };
+    'id': id,
+    'vehicleId': vehicleId,
+    'name': name,
+    'category': category.name,
+    'intervalKm': intervalKm,
+    'intervalMonths': intervalMonths,
+    'lastKm': lastKm,
+    'lastDate': lastDate.toIso8601String(),
+    'baselineKm': baselineKm,
+    'baselineDate': baselineDate.toIso8601String(),
+    'estimatedCost': estimatedCost,
+    'notes': notes,
+    'reminderEnabled': reminderEnabled,
+  };
 
   factory MaintenanceSchedule.fromJson(Map<String, dynamic> json) =>
       MaintenanceSchedule(
@@ -171,6 +182,10 @@ class MaintenanceSchedule {
         lastKm: (json['lastKm'] as num?)?.toInt() ?? 0,
         lastDate: DateTime.tryParse(json['lastDate'] as String? ?? '') ??
             DateTime.now(),
+        // Absent in data saved before baselines existed: the constructor
+        // then falls back to lastKm / lastDate.
+        baselineKm: (json['baselineKm'] as num?)?.toInt(),
+        baselineDate: DateTime.tryParse(json['baselineDate'] as String? ?? ''),
         estimatedCost: (json['estimatedCost'] as num?)?.toInt() ?? 0,
         notes: json['notes'] as String? ?? '',
         reminderEnabled: json['reminderEnabled'] as bool? ?? true,
@@ -203,6 +218,9 @@ class ScheduleEvaluation {
     required this.progress,
     required this.status,
   });
+
+  /// True when the date-based interval lands exactly on today.
+  bool get isDueToday => daysRemaining == 0;
 
   String get statusLabel {
     switch (status) {

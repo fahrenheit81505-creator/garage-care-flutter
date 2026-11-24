@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import '../models/maintenance_schedule.dart';
 import '../state/garage_controller.dart';
+import '../utils/calendar_date.dart';
 import '../theme/app_theme.dart';
 import '../widgets/health_ring.dart';
 import '../widgets/odometer_dialog.dart';
@@ -383,15 +384,19 @@ class _UrgentScheduleTile extends StatelessWidget {
     final dateFmt = DateFormat('yyyy/MM/dd');
 
     final kmText = evaluation.kmRemaining != null
-        ? (evaluation.kmRemaining! <= 0
-            ? '超出 ${numFmt.format(evaluation.kmRemaining!.abs())} km'
-            : '剩 ${numFmt.format(evaluation.kmRemaining)} km')
+        ? (evaluation.kmRemaining! < 0
+              ? '超出 ${numFmt.format(evaluation.kmRemaining!.abs())} km'
+              : evaluation.kmRemaining == 0
+              ? '已達保養里程'
+              : '剩 ${numFmt.format(evaluation.kmRemaining)} km')
         : '不限里程';
 
     final dayText = evaluation.daysRemaining != null
-        ? (evaluation.daysRemaining! <= 0
-            ? '逾期 ${evaluation.daysRemaining!.abs()} 天'
-            : '剩 ${evaluation.daysRemaining} 天 (${dateFmt.format(evaluation.dueDate!)})')
+        ? (evaluation.daysRemaining! < 0
+              ? '逾期 ${evaluation.daysRemaining!.abs()} 天'
+              : evaluation.daysRemaining == 0
+              ? '今天到期'
+              : '剩 ${evaluation.daysRemaining} 天 (${dateFmt.format(evaluation.dueDate!)})')
         : '不限日期';
 
     return Padding(
@@ -494,11 +499,13 @@ class _DocRow extends StatelessWidget {
     Color badgeColor = Theme.of(context).colorScheme.onSurfaceVariant;
 
     if (date != null) {
-      final target = DateTime(date!.year, date!.month, date!.day);
-      final diff = target.difference(today).inDays;
-      if (diff <= 0) {
+      final diff = calendarDaysBetween(today, date!);
+      if (diff < 0) {
         statusText = '已逾期 ${diff.abs()} 天';
         badgeColor = AppTheme.statusError;
+      } else if (diff == 0) {
+        statusText = '今天到期';
+        badgeColor = AppTheme.statusWarning;
       } else if (diff <= 30) {
         statusText = '剩餘 $diff 天';
         badgeColor = AppTheme.statusWarning;
