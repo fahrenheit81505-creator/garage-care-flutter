@@ -1,5 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 import '../state/garage_controller.dart';
+import '../widgets/form_helpers.dart';
 import '../widgets/odometer_dialog.dart';
 import '../widgets/record_form_sheet.dart';
 import '../widgets/schedule_form_sheet.dart';
@@ -125,8 +126,45 @@ class _HomeShellState extends State<HomeShell> {
           );
         }
 
+        if (widget.controller.loadFailed) {
+          return Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      size: 48,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      '無法讀取車庫資料',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      '已儲存的資料沒有被變更，請再試一次。',
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 20),
+                    FilledButton.icon(
+                      onPressed: widget.controller.init,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('重試'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+
         final vehicle = widget.controller.activeVehicle;
         final alertCount = widget.controller.activeAlertCount;
+        final unreadable = widget.controller.unreadableSections;
 
         final screens = [
           OverviewScreen(
@@ -206,6 +244,13 @@ class _HomeShellState extends State<HomeShell> {
                       editing: vehicle,
                     );
                   } else if (value == 'reset_demo') {
+                    final confirmed = await confirmDestructive(
+                      context,
+                      title: '重置為示範資料？',
+                      message: '目前所有車輛、保養排程、保養紀錄與通知設定都會被示範資料取代。此動作無法復原。',
+                      confirmLabel: '全部重置',
+                    );
+                    if (!confirmed) return;
                     await widget.controller.resetDemoData();
                     if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -247,9 +292,29 @@ class _HomeShellState extends State<HomeShell> {
               ),
             ],
           ),
-          body: IndexedStack(
-            index: _tabIndex,
-            children: screens,
+          body: Column(
+            children: [
+              if (unreadable.isNotEmpty)
+                MaterialBanner(
+                  leading: Icon(
+                    Icons.warning_amber_rounded,
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                  content: Text(
+                    '部分已儲存的資料無法讀取（${unreadable.join('、')}），'
+                    '無法讀取的項目已略過，原始資料另存備份。',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: widget.controller.dismissStorageWarning,
+                      child: const Text('知道了'),
+                    ),
+                  ],
+                ),
+              Expanded(
+                child: IndexedStack(index: _tabIndex, children: screens),
+              ),
+            ],
           ),
           floatingActionButton: _buildFab(),
           bottomNavigationBar: NavigationBar(

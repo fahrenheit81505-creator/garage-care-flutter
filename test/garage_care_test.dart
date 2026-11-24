@@ -1,4 +1,3 @@
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:garage_care/main.dart';
 import 'package:garage_care/models/maintenance_schedule.dart';
@@ -7,6 +6,8 @@ import 'package:garage_care/models/vehicle.dart';
 import 'package:garage_care/services/notification_service.dart';
 import 'package:garage_care/state/garage_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'support/fake_notification_service.dart';
 
 void main() {
   group('MaintenanceSchedule evaluation', () {
@@ -167,7 +168,7 @@ void main() {
         (tester) async {
       SharedPreferences.setMockInitialValues({});
       final controller = GarageController(
-        notifications: _FakeNotificationService(),
+        notifications: FakeNotificationService(),
       );
 
       await tester.runAsync(() => controller.init());
@@ -185,35 +186,4 @@ void main() {
       expect(find.text('推播功能驗證與測試'), findsOneWidget);
     });
   });
-}
-
-class _FakeNotificationService extends NotificationService {
-  @override
-  Future<void> initialize() async {}
-
-  @override
-  Future<NotificationPermissionStatus> checkPermissionStatus() async {
-    return const NotificationPermissionStatus(
-      granted: true,
-      canScheduleExactAlarms: true,
-      timezoneName: 'Asia/Taipei',
-    );
-  }
-
-  @override
-  Future<int> syncMaintenanceNotifications({
-    required List<Vehicle> vehicles,
-    required List<MaintenanceSchedule> schedules,
-    required NotificationSettings settings,
-  }) async {
-    return NotificationService.buildNotificationPlans(
-      vehicles: vehicles,
-      schedules: schedules,
-      settings: settings,
-    ).length;
-  }
-
-  @override
-  Future<List<PendingNotificationRequest>> getPendingNotifications() async =>
-      const [];
 }

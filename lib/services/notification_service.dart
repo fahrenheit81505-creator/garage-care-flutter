@@ -8,6 +8,7 @@ import 'package:timezone/timezone.dart' as tz;
 import '../models/maintenance_schedule.dart';
 import '../models/notification_settings.dart';
 import '../models/vehicle.dart';
+import '../utils/calendar_date.dart';
 
 /// Represents a concrete notification planned to be registered with Android/iOS OS.
 class ScheduledNotificationPlan {
@@ -221,7 +222,7 @@ class NotificationService {
       if (dueDate == null) continue;
 
       for (final advance in settings.advanceDays) {
-        final triggerDay = dueDate.subtract(Duration(days: advance));
+        final triggerDay = addCalendarDays(dueDate, -advance);
         final triggerAt = DateTime(
           triggerDay.year,
           triggerDay.month,
@@ -264,7 +265,7 @@ class NotificationService {
           if (dueDate == null) continue;
 
           for (final advance in settings.advanceDays) {
-            final triggerDay = dueDate.subtract(Duration(days: advance));
+            final triggerDay = addCalendarDays(dueDate, -advance);
             final triggerAt = DateTime(
               triggerDay.year,
               triggerDay.month,
@@ -309,20 +310,29 @@ class NotificationService {
   }) async {
     await initialize();
 
-    try {
-      await _plugin.cancelAll();
-    } catch (e) {
-      debugPrint('cancelAll error: $e');
-      return 0;
-    }
-
-    if (!settings.enabled) return 0;
-
     final plans = buildNotificationPlans(
       vehicles: vehicles,
       schedules: schedules,
       settings: settings,
     );
+
+    // Cancel only pending reminders that are no longer wanted. cancelAll()
+    // would also clear reminders already delivered to the notification shade
+    // and the pending delayed test notification.
+    try {
+      final wantedIds = {for (final plan in plans) plan.id};
+      final pending = await _plugin.pendingNotificationRequests();
+      for (final request in pending) {
+        if (!_isMaintenanceId(request.id)) continue;
+        if (wantedIds.contains(request.id)) continue;
+        await _plugin.cancel(id: request.id);
+      }
+    } catch (e) {
+      debugPrint('cancel stale notifications error: $e');
+      return 0;
+    }
+
+    if (plans.isEmpty) return 0;
 
     final perm = await checkPermissionStatus();
     final scheduleMode = perm.canScheduleExactAlarms
@@ -436,12 +446,19 @@ class NotificationService {
     }
   }
 
+  static const int _maintenanceIdBase = 1000;
+  static const int _maintenanceIdSpan = 800000;
+
   static int _stableNotificationId(String key) {
     var hash = 0x811c9dc5;
     for (final unit in key.codeUnits) {
       hash ^= unit;
       hash = (hash * 0x01000193) & 0x7fffffff;
     }
-    return (hash % 800000) + 1000;
+    return (hash % _maintenanceIdSpan) + _maintenanceIdBase;
   }
+
+  /// Maintenance reminder ids stay below the test notification ids (99000x).
+  static bool _isMaintenanceId(int id) =>
+      id >= _maintenanceIdBase && id < _maintenanceIdBase + _maintenanceIdSpan;
 }

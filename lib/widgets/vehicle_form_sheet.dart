@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../models/vehicle.dart';
 import '../state/garage_controller.dart';
+import 'form_helpers.dart';
 
 const List<String> _fuelOptions = [
   '汽油',
@@ -60,10 +61,16 @@ class _VehicleFormSheetState extends State<_VehicleFormSheet> {
   DateTime? _insuranceExpiry;
   bool _addDefaults = true;
 
+  /// Fixed for the lifetime of the sheet so a repeated save updates the same
+  /// vehicle instead of adding another one.
+  late final String _vehicleId;
+  bool _busy = false;
+
   @override
   void initState() {
     super.initState();
     final v = widget.editing;
+    _vehicleId = v?.id ?? widget.controller.generateId('veh');
     _brandCtrl = TextEditingController(text: v?.brand ?? '');
     _modelCtrl = TextEditingController(text: v?.model ?? '');
     _plateCtrl = TextEditingController(text: v?.plate ?? '');
@@ -109,9 +116,11 @@ class _VehicleFormSheetState extends State<_VehicleFormSheet> {
   }
 
   Future<void> _submit() async {
+    if (_busy) return;
     if (!_formKey.currentState!.validate()) return;
+    setState(() => _busy = true);
     final vehicle = Vehicle(
-      id: widget.editing?.id ?? widget.controller.generateId('veh'),
+      id: _vehicleId,
       brand: _brandCtrl.text.trim(),
       model: _modelCtrl.text.trim(),
       plate: _plateCtrl.text.trim().toUpperCase(),
@@ -126,23 +135,51 @@ class _VehicleFormSheetState extends State<_VehicleFormSheet> {
       insuranceExpiry: _insuranceExpiry,
     );
 
-    await widget.controller.saveVehicle(
-      vehicle,
-      addDefaultSchedules: widget.editing == null && _addDefaults,
+    final saved = await runStorageAction(
+      context,
+      () => widget.controller.saveVehicle(
+        vehicle,
+        addDefaultSchedules: widget.editing == null && _addDefaults,
+      ),
     );
-
-    if (mounted) {
-      Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            widget.editing == null
-                ? '已新增車輛 ${vehicle.displayName}'
-                : '已更新車輛資料並同步通知排程',
-          ),
-        ),
-      );
+    if (!mounted) return;
+    if (!saved) {
+      setState(() => _busy = false);
+      return;
     }
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          widget.editing == null
+              ? '已新增車輛 ${vehicle.displayName}'
+              : '已更新車輛資料並同步通知排程',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _delete() async {
+    if (_busy) return;
+    final confirmed = await confirmDestructive(
+      context,
+      title: '刪除這台車輛？',
+      message:
+          '「${widget.editing!.displayName}」以及它的所有保養排程、保養紀錄與系統提醒都會被永久刪除。此動作無法復原。',
+      confirmLabel: '刪除車輛',
+    );
+    if (!confirmed || !mounted || _busy) return;
+    setState(() => _busy = true);
+    final deleted = await runStorageAction(
+      context,
+      () => widget.controller.deleteVehicle(widget.editing!.id),
+    );
+    if (!mounted) return;
+    if (!deleted) {
+      setState(() => _busy = false);
+      return;
+    }
+    Navigator.of(context).pop();
   }
 
   @override
@@ -173,11 +210,7 @@ class _VehicleFormSheetState extends State<_VehicleFormSheet> {
                   ),
                   if (isEdit && widget.controller.vehicles.length > 1)
                     TextButton.icon(
-                      onPressed: () async {
-                        await widget.controller
-                            .deleteVehicle(widget.editing!.id);
-                        if (context.mounted) Navigator.of(context).pop();
-                      },
+                      onPressed: _busy ? null : _delete,
                       icon: const Icon(Icons.delete_outline, size: 18),
                       label: const Text('刪除'),
                       style: TextButton.styleFrom(
@@ -252,6 +285,8 @@ class _VehicleFormSheetState extends State<_VehicleFormSheet> {
                         labelText: '目前里程 *',
                         suffixText: 'km',
                       ),
+                      validator: (v) =>
+                          requiredWholeNumber(v, emptyMessage: '請輸入里程'),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -360,7 +395,7 @@ class _VehicleFormSheetState extends State<_VehicleFormSheet> {
               ],
               const SizedBox(height: 16),
               FilledButton(
-                onPressed: _submit,
+                onPressed: _busy ? null : _submit,
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),

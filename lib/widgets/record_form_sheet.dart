@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../models/maintenance_schedule.dart';
 import '../models/service_record.dart';
 import '../state/garage_controller.dart';
+import 'form_helpers.dart';
 
 Future<void> showRecordFormSheet(
   BuildContext context,
@@ -51,6 +52,11 @@ class _RecordFormSheetState extends State<_RecordFormSheet> {
   late ServiceCategory _category;
   late Set<String> _linkedScheduleIds;
 
+  /// Fixed for the lifetime of the sheet so a repeated save updates the same
+  /// record instead of adding another one.
+  late final String _recordId;
+  bool _busy = false;
+
   @override
   void initState() {
     super.initState();
@@ -58,6 +64,7 @@ class _RecordFormSheetState extends State<_RecordFormSheet> {
     final pre = widget.prefillSchedule;
     final vehicle = widget.controller.activeVehicle;
 
+    _recordId = e?.id ?? widget.controller.generateId('rec');
     _titleCtrl = TextEditingController(text: e?.title ?? pre?.name ?? '');
     _odoCtrl = TextEditingController(
       text: '${e?.odometer ?? vehicle.odometer}',
@@ -86,10 +93,13 @@ class _RecordFormSheetState extends State<_RecordFormSheet> {
   }
 
   Future<void> _submit() async {
+    if (_busy) return;
     if (!_formKey.currentState!.validate()) return;
+    setState(() => _busy = true);
     final record = ServiceRecord(
-      id: widget.editing?.id ?? widget.controller.generateId('rec'),
-      vehicleId: widget.editing?.vehicleId ?? widget.controller.activeVehicle.id,
+      id: _recordId,
+      vehicleId:
+          widget.editing?.vehicleId ?? widget.controller.activeVehicle.id,
       title: _titleCtrl.text.trim(),
       date: DateTime(_date.year, _date.month, _date.day),
       odometer: int.tryParse(_odoCtrl.text.trim()) ?? 0,
@@ -100,19 +110,45 @@ class _RecordFormSheetState extends State<_RecordFormSheet> {
       linkedScheduleIds: _linkedScheduleIds.toList(),
     );
 
-    await widget.controller.saveRecord(record);
-    if (mounted) {
-      Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _linkedScheduleIds.isNotEmpty
-                ? '已儲存保養紀錄，並自動重設下次到期提醒'
-                : '已儲存保養維修紀錄',
-          ),
-        ),
-      );
+    final saved = await runStorageAction(
+      context,
+      () => widget.controller.saveRecord(record),
+    );
+    if (!mounted) return;
+    if (!saved) {
+      setState(() => _busy = false);
+      return;
     }
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          _linkedScheduleIds.isNotEmpty ? '已儲存保養紀錄，並自動重設下次到期提醒' : '已儲存保養維修紀錄',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _delete() async {
+    if (_busy) return;
+    final confirmed = await confirmDestructive(
+      context,
+      title: '刪除這筆紀錄？',
+      message: '「${widget.editing!.title}」將被永久刪除，連動排程的下次到期日會依其餘紀錄重新計算。此動作無法復原。',
+      confirmLabel: '刪除',
+    );
+    if (!confirmed || !mounted || _busy) return;
+    setState(() => _busy = true);
+    final deleted = await runStorageAction(
+      context,
+      () => widget.controller.deleteRecord(widget.editing!.id),
+    );
+    if (!mounted) return;
+    if (!deleted) {
+      setState(() => _busy = false);
+      return;
+    }
+    Navigator.of(context).pop();
   }
 
   @override
@@ -148,11 +184,7 @@ class _RecordFormSheetState extends State<_RecordFormSheet> {
                   ),
                   if (isEdit)
                     TextButton.icon(
-                      onPressed: () async {
-                        await widget.controller
-                            .deleteRecord(widget.editing!.id);
-                        if (context.mounted) Navigator.of(context).pop();
-                      },
+                      onPressed: _busy ? null : _delete,
                       icon: const Icon(Icons.delete_outline, size: 18),
                       label: const Text('刪除'),
                       style: TextButton.styleFrom(
@@ -202,6 +234,8 @@ class _RecordFormSheetState extends State<_RecordFormSheet> {
                         labelText: '當時里程 *',
                         suffixText: 'km',
                       ),
+                      validator: (v) =>
+                          requiredWholeNumber(v, emptyMessage: '請輸入里程'),
                     ),
                   ),
                 ],
@@ -287,7 +321,7 @@ class _RecordFormSheetState extends State<_RecordFormSheet> {
               ],
               const SizedBox(height: 18),
               FilledButton(
-                onPressed: _submit,
+                onPressed: _busy ? null : _submit,
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
